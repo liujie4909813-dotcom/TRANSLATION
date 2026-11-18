@@ -15,7 +15,12 @@ echo.
 echo   Step 2 (here): paste the repo URL below.
 echo       It looks like: https://github.com/YOUR_NAME/zh2en.git
 echo.
-set /p REPOURL=Repo URL: 
+set "CUR="
+for /f "tokens=*" %%i in ('git remote get-url origin 2^>nul') do set "CUR=%%i"
+if defined CUR echo   Already configured: %CUR%
+echo.
+set /p REPOURL=Repo URL (Enter = use the one above): 
+if "%REPOURL%"=="" if defined CUR set "REPOURL=%CUR%"
 if "%REPOURL%"=="" (
   echo.
   echo No URL. Cancelled.

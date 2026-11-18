@@ -1,0 +1,10 @@
+{
+  "hotkey_translate": "alt+[",
+  "hotkey_clipboard": "alt+]",
+  "hotkey_quit": "ctrl+alt+q",
+  "providers": ["mymemory", "google", "youdao"],
+  "insert_method": "auto",
+  "restore_clipboard": true,
+  "paste_delay": 0.35,
+  "http_timeout": 10
+}

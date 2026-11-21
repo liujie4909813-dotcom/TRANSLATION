@@ -53,6 +53,7 @@ except Exception:
 
 DEFAULT_CFG = {
     "hotkey_translate": "ctrl+alt+t",
+    "hotkey_translate_reverse": "alt+;",
     "hotkey_clipboard": "ctrl+alt+y",
     "hotkey_quit": "ctrl+alt+q",
     "providers": ["mymemory", "google", "youdao"],
@@ -63,6 +64,12 @@ DEFAULT_CFG = {
 }
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+
+# 翻译方向：(源语言, 目标语言)
+DIRECTIONS = {
+    "zh2en": ("zh-CN", "en"),
+    "en2zh": ("en", "zh-CN"),
+}
 
 user32 = ctypes.windll.user32
 
@@ -564,11 +571,12 @@ def _split_chunks(text, limit):
     return [c for c in chunks if c.strip()]
 
 
-def tr_mymemory(text):
+def tr_mymemory(text, direction="zh2en"):
+    src, dst = DIRECTIONS.get(direction, DIRECTIONS["zh2en"])
     out = []
     for chunk in _split_chunks(text, 450):
         url = "https://api.mymemory.translated.net/get?" + urllib.parse.urlencode(
-            {"q": chunk, "langpair": "zh-CN|en"}
+            {"q": chunk, "langpair": f"{src}|{dst}"}
         )
         js = json.loads(_http(url))
         if int(js.get("responseStatus", 0)) != 200:
@@ -581,11 +589,12 @@ def tr_mymemory(text):
     return " ".join(out)
 
 
-def tr_google(text):
+def tr_google(text, direction="zh2en"):
+    src, dst = DIRECTIONS.get(direction, DIRECTIONS["zh2en"])
     out = []
     for chunk in _split_chunks(text, 1800):
         url = "https://translate.googleapis.com/translate_a/single?" + urllib.parse.urlencode(
-            {"client": "gtx", "sl": "zh-CN", "tl": "en", "dt": "t", "q": chunk}
+            {"client": "gtx", "sl": src, "tl": dst, "dt": "t", "q": chunk}
         )
         js = json.loads(_http(url))
         segs = [s[0] for s in js[0] if s and s[0]]
@@ -596,10 +605,13 @@ def tr_google(text):
     return "".join(out)
 
 
-def tr_youdao(text):
+def tr_youdao(text, direction="zh2en"):
+    if direction == "en2zh":
+        pair = {"from": "EN", "to": "zh-CHS"}
+    else:
+        pair = {"from": "zh-CHS", "to": "en"}
     data = urllib.parse.urlencode(
-        {"i": text, "from": "zh-CHS", "to": "en", "doctype": "json",
-         "version": "2.1", "keyfrom": "fanyi.web"}
+        {"i": text, "doctype": "json", "version": "2.1", "keyfrom": "fanyi.web", **pair}
     ).encode()
     raw = _http("https://aidemo.youdao.com/trans", data,
                 {"Content-Type": "application/x-www-form-urlencoded"})
@@ -616,14 +628,24 @@ _cache = {}
 _cache_lock = threading.Lock()
 
 
-def translate(text):
-    """返回 (英文, 引擎名, 耗时秒, 错误信息)。"""
+def detect_direction(text):
+    """有中文 → 中译英；没有中文 → 英译中。"""
+    return "zh2en" if CJK_RE.search(text or "") else "en2zh"
+
+
+def translate(text, direction=None):
+    """返回 (译文, 引擎名, 耗时秒, 错误信息)。
+
+    direction: "zh2en" / "en2zh"，不传就按内容自动判断。
+    """
     text = (text or "").strip()
     if not text:
         return "", "", 0.0, "内容为空"
+    direction = direction or detect_direction(text)
+    key = (direction, text)
     with _cache_lock:
-        if text in _cache:
-            return _cache[text][0], _cache[text][1] + "(缓存)", 0.0, None
+        if key in _cache:
+            return _cache[key][0], _cache[key][1] + "(缓存)", 0.0, None
 
     errors = []
     for name in CFG.get("providers", ["mymemory"]):
@@ -632,7 +654,7 @@ def translate(text):
             continue
         t0 = time.time()
         try:
-            result = fn(text)
+            result = fn(text, direction)
         except Exception as e:
             errors.append(f"{name}: {type(e).__name__} {e}")
             continue
@@ -640,7 +662,7 @@ def translate(text):
         with _cache_lock:
             if len(_cache) > 800:
                 _cache.clear()
-            _cache[text] = (result, name)
+            _cache[key] = (result, name)
         return result, name, cost, None
     return "", "", 0.0, "所有翻译源都失败了 -> " + " | ".join(errors)
 
@@ -714,6 +736,95 @@ def toast(text, ms=2600):
     sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
     win.geometry(f"+{sw - w - 26}+{sh - h - 70}")
     win.after(ms, win.destroy)
+
+
+_POPUPS = []
+
+
+class ResultPopup:
+    """只读译文弹窗：显示原文 + 译文，可一键复制，不碰原窗口的内容。"""
+
+    def __init__(self, source="", translated="", engine="", cost=0.0):
+        if not HAS_TK:
+            print("[译文]", translated)
+            return
+        self.translated = translated
+        self._tk = tk
+
+        win = tk.Toplevel(_ui_root)
+        self.win = win
+        win.title("英 → 中")
+        win.configure(bg="#ffffff")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+
+        pad = tk.Frame(win, bg="#ffffff", padx=14, pady=12)
+        pad.pack(fill="both", expand=True)
+
+        src_show = source if len(source) <= 220 else source[:220] + "…"
+        tk.Label(pad, text=src_show, justify="left", anchor="w",
+                 bg="#ffffff", fg="#8b95a5", font=FONT_SMALL,
+                 wraplength=470).pack(fill="x")
+
+        tk.Frame(pad, bg="#eef1f5", height=1).pack(fill="x", pady=(9, 0))
+
+        # 按内容长度估算行数，长句自动加高（最多 12 行，超出滚动）
+        est_lines = max(2, min(12, (len(translated) // 34) + 1 + translated.count("\n")))
+        self.txt = tk.Text(pad, height=est_lines, width=46, font=("Microsoft YaHei UI", 12),
+                           wrap="word", relief="flat", bd=0, bg="#ffffff", fg="#101828",
+                           padx=0, pady=8, highlightthickness=0, state="disabled",
+                           cursor="arrow")
+        self.txt.pack(fill="x")
+        self.txt.configure(state="normal")
+        self.txt.insert("1.0", translated)
+        self.txt.configure(state="disabled")
+
+        bar = tk.Frame(pad, bg="#ffffff")
+        bar.pack(fill="x", pady=(6, 0))
+        info = engine + (f" · {int(cost * 1000)}ms" if cost else "")
+        self.status = tk.Label(bar, text=info, bg="#ffffff", fg="#9aa3b2",
+                               font=FONT_SMALL, anchor="w")
+        self.status.pack(side="left")
+
+        mk = lambda t, c, fg, cmd: tk.Button(bar, text=t, command=cmd, font=FONT_SMALL,
+                                            bg=c, fg=fg, relief="flat", bd=0,
+                                            padx=12, pady=5, cursor="hand2",
+                                            activebackground=c, activeforeground=fg)
+        mk("关闭", "#eef1f5", "#4b5563", self.close).pack(side="right", padx=(6, 0))
+        mk("复制译文", "#2f6bff", "#ffffff", self.copy).pack(side="right")
+
+        win.bind("<Escape>", lambda e: self.close())
+        win.protocol("WM_DELETE_WINDOW", self.close)
+
+        win.update_idletasks()
+        w, h = win.winfo_width(), win.winfo_height()
+        mx, my = mouse_pos()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        x = min(max(mx - w // 2, 16), sw - w - 16)
+        y = min(max(my + 22, 16), sh - h - 60)
+        win.geometry(f"+{x}+{y}")
+        win.lift()
+        try:
+            win.focus_force()
+        except Exception:
+            pass
+        _POPUPS.append(self)
+
+    def copy(self):
+        ok = clip_set(self.translated)
+        try:
+            self.status.configure(text="已复制到剪贴板" if ok else "复制失败：剪贴板被占用",
+                                  fg="#16a34a" if ok else "#dc2626")
+        except Exception:
+            pass
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+        if self in _POPUPS:
+            _POPUPS.remove(self)
 
 
 class Popup:
@@ -983,8 +1094,9 @@ def flow_translate():
         if not CJK_RE.search(text):
             if cut_used:                               # 剪掉的东西得还回去
                 insert_text(text, backup)
-            log("不含中文 → 跳过")
-            post(lambda: toast("选中内容不含中文，没翻译"))
+            log("不含中文 → 跳过（英文可用反向热键看中文）")
+            post(lambda: toast(f"这段不含中文。要看中文译文，按 "
+                               f"{CFG['hotkey_translate_reverse']}", 3000))
             return
 
         result, engine, cost, err = translate(text)
@@ -1007,6 +1119,50 @@ def flow_translate():
         else:
             log("回写失败，原文未改动")
             post(lambda: toast(f"回写失败（剪贴板被占用），原文没动。\n译文：{result[:120]}", 4500))
+    finally:
+        _lock.release()
+
+
+def flow_translate_reverse():
+    """选中英文 → 按 Alt+; → 弹出中文译文（只读，不改原文）。"""
+    if not _lock.acquire(blocking=False):
+        return
+    try:
+        log(f"触发 {CFG['hotkey_translate_reverse']}（英 → 中）")
+        hwnd = fg_window()
+        wait_modifiers_release()
+        time.sleep(0.05)
+
+        text, backup = grab_selection()
+        if not text:
+            time.sleep(0.12)
+            text, backup = grab_selection()
+        if not text:
+            log("Ctrl+C 没拿到，改用 WM_COPY")
+            time.sleep(0.08)
+            text, backup = grab_selection(via_message=True)
+        # 注意：这里绝不使用 Ctrl+X —— 只是看一眼意思，不该把用户原文剪走
+        if not text:
+            log("没取到选中内容")
+            post(lambda: toast("没取到选中的英文。先框选一段文字再按 "
+                               + CFG["hotkey_translate_reverse"], 3200))
+            return
+
+        log(f"取到 {len(text)} 字：{text[:40]!r}")
+        if CJK_RE.search(text):
+            log("选中内容含中文，不是英译中")
+            post(lambda: toast(f"这段是中文，用 {CFG['hotkey_translate']} 转英文", 2600))
+            return
+
+        result, engine, cost, err = translate(text, "en2zh")
+        if err:
+            log(f"翻译失败：{err[:100]}")
+            post(lambda: toast("翻译失败：" + err[:120], 4200))
+            return
+
+        log(f"译文({engine} {int(cost * 1000)}ms)：{result[:60]!r}")
+        post(lambda: ResultPopup(source=text, translated=result,
+                                 engine=engine, cost=cost))
     finally:
         _lock.release()
 
@@ -1147,7 +1303,7 @@ def check():
 
     print("[5] 翻译接口")
     t0 = time.time()
-    res, engine, cost, err = translate("今天的构建已经修好了")
+    res, engine, cost, err = translate("今天的构建已经修好了", "zh2en")
     if err:
         print(f"      失败：{err[:150]}")
         hints.append("网络被拦：检查代理/防火墙，或改 config.json 里的 providers")
@@ -1156,9 +1312,18 @@ def check():
         print(f"      {engine}  {int(cost * 1000)}ms")
         print(f"      今天的构建已经修好了 → {res[:80]}")
 
+    res2, engine2, cost2, err2 = translate("Ship it tomorrow morning.", "en2zh")
+    if err2:
+        print(f"      英译中失败：{err2[:150]}")
+        ok_all = False
+    else:
+        print(f"      {engine2}  {int(cost2 * 1000)}ms")
+        print(f"      Ship it tomorrow morning. → {res2[:80]}")
+
     print("[6] 快捷键能否被系统注册（RegisterHotKey）")
     bad = []
-    for combo in (CFG["hotkey_translate"], CFG["hotkey_clipboard"], CFG["hotkey_quit"]):
+    for combo in (CFG["hotkey_translate"], CFG["hotkey_translate_reverse"],
+                  CFG["hotkey_clipboard"], CFG["hotkey_quit"]):
         ok, code = hotkey_test(combo)
         mods, vk = combo_to_hotkey(combo)
         detail = f"mods=0x{mods:02X} vk=0x{vk:02X}" if vk else "键名解析失败"
@@ -1178,7 +1343,8 @@ def check():
     if ok_all:
         print("结论：环境正常。两个用法任选：")
         print("      ① 双击 翻译台.bat —— 右下角小窗口，打字就出英文，不用快捷键（最稳）")
-        print(f"      ② 双击 启动翻译.bat —— 选中中文按 {CFG['hotkey_translate']}")
+        print(f"      ② 双击 启动翻译.bat —— 选中中文按 {CFG['hotkey_translate']}，"
+              f"选中英文按 {CFG['hotkey_translate_reverse']}")
         print("      注意：目标程序若是管理员权限运行，本工具也要用管理员身份启动。")
     else:
         print("结论：有问题，按下面提示处理：")
@@ -1204,7 +1370,15 @@ def main():
         return
 
     if len(sys.argv) > 2 and sys.argv[1] == "--tr":
-        result, engine, cost, err = translate(" ".join(sys.argv[2:]))
+        result, engine, cost, err = translate(" ".join(sys.argv[2:]), "zh2en")
+        if err:
+            print("失败:", err)
+            sys.exit(1)
+        print(f"[{engine} {int(cost * 1000)}ms] {result}")
+        return
+
+    if len(sys.argv) > 2 and sys.argv[1] in ("--zh", "--tr2"):
+        result, engine, cost, err = translate(" ".join(sys.argv[2:]), "en2zh")
         if err:
             print("失败:", err)
             sys.exit(1)
@@ -1222,6 +1396,7 @@ def main():
     print("  zh2en · 中文输入即时转英文")
     print("=" * 52)
     print(f"  {CFG['hotkey_translate']:<14} 选中中文 → 英文替换 / 无选中 → 弹出输入框")
+    print(f"  {CFG['hotkey_translate_reverse']:<14} 选中英文 → 弹出中文译文（不改原文）")
     print(f"  {CFG['hotkey_clipboard']:<14} 剪贴板中文 → 英文")
     print(f"  {CFG['hotkey_quit']:<14} 退出")
     print("-" * 52)
@@ -1239,6 +1414,7 @@ def main():
 
     bindings = [
         (CFG["hotkey_translate"], flow_translate),
+        (CFG["hotkey_translate_reverse"], flow_translate_reverse),
         (CFG["hotkey_clipboard"], flow_clipboard),
         (CFG["hotkey_quit"], quit_app),
     ]
@@ -1276,7 +1452,8 @@ def main():
         return
 
     print("=" * 52)
-    print("  >> 已就绪。选中一段中文，按 " + CFG["hotkey_translate"].upper() + " 试试。")
+    print(f"  >> 已就绪。选中中文按 {CFG['hotkey_translate'].upper()} 转英文，")
+    print(f"             选中英文按 {CFG['hotkey_translate_reverse'].upper()} 看中文。")
     print("=" * 52)
 
     try:

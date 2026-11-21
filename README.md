@@ -34,7 +34,18 @@ I'll release this version to the test environment first, and then deploy to prod
 
 这条其实最接近「输入法直接出英文」：你正常打中文，英文自动落到聊天框里。
 
-**3. 剪贴板翻译**
+**3. 英文看中文（反向）**
+
+选中一段英文 → `Alt+;` → 弹出一个小窗，里面是中文译文。**不会改动你选中的原文**，只是给你看。
+
+```
+Ship this version to staging first, then production tomorrow.   ← 选中这段，按 Alt+;
+→ 先将此版本发布到暂存环境，然后明天发布到生产环境。
+```
+
+弹窗里：`复制译文` 一键拿走，`Esc` 关掉。原文一个字都不动，适合读英文文档、看报错、翻别人的 commit message。
+
+**4. 剪贴板翻译**
 
 复制一段中文 → `Alt+]` → 剪贴板里的内容变成英文，直接 Ctrl+V 用。
 
@@ -43,10 +54,11 @@ I'll release this version to the test environment first, and then deploy to prod
 | 快捷键 | 作用 |
 | --- | --- |
 | `Alt+[` | 选中中文→英文替换；没选中→弹输入框 |
+| `Alt+;` | 选中英文→弹窗显示中文（不改原文） |
 | `Alt+]` | 剪贴板中文→英文 |
-| `Ctrl+Alt+Q` | 退出 |
+| `Ctrl+Alt+Shift+Q` | 退出（原来的 `Ctrl+Alt+Q` 在有些机器上被别的软件占用，所以换成加 Shift） |
 
-按键在 `config.json` 里改，改完重启生效。写法就是 `alt+[`、`ctrl+alt+t` 这种。
+按键在 `config.json` 里改，改完重启生效。写法就是 `alt+[`、`alt+;`、`ctrl+alt+t` 这种。反向热键对应配置项 `hotkey_translate_reverse`。
 
 **注册方式**：走 Windows 的 `RegisterHotKey`（系统级热键），不是低级键盘钩子。好处有两个——注册成不成功启动时就告诉你，不会出现「按了完全没反应」的黑盒；而且按下的键被系统直接吃掉，不会漏一个 `[` 到你正在打字的框里。
 
@@ -55,8 +67,9 @@ I'll release this version to the test environment first, and then deploy to prod
 ```
   已注册热键（系统级 RegisterHotKey）:
       alt+[
+      alt+;
       alt+]
-      ctrl+alt+q
+      ctrl+alt+shift+q
 ```
 
 有一条写「[失败] … 已被别的程序占用」，就改 `config.json` 换键位。
@@ -72,9 +85,10 @@ I'll release this version to the test environment first, and then deploy to prod
 启动后窗口里会显示：
 
 ```
-  >> 已就绪。切到任意程序，选中一段中文，按 ALT+[ 试试。
-  >> 按了没反应：关掉本窗口，双击「自检.bat」看卡在哪。
-  已监听按键: alt+[ / alt+] / ctrl+alt+q
+  >> 已就绪。选中中文按 ALT+[ 转英文，
+             选中英文按 ALT+; 看中文。
+  已注册热键（系统级 RegisterHotKey）:
+      alt+[ / alt+; / alt+] / ctrl+alt+shift+q
 ```
 
 每次按键动作都会在窗口里打一行日志（取到几个字、用的哪个引擎、有没有替换成功），出问题不用猜：
@@ -167,7 +181,8 @@ zh2en/
 命令行：
 
 ```bash
-py zh2en.py --tr "这个需求下周能上线吗"   # 只测翻译
+py zh2en.py --tr "这个需求下周能上线吗"   # 只测翻译（中→英）
+py zh2en.py --zh "Ship it tomorrow"       # 只测翻译（英→中）
 py zh2en.py --check                       # 六项自检
 py zh2en.py --keys                        # 按键诊断，40 秒
 ```

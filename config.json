@@ -1,7 +1,8 @@
 {
   "hotkey_translate": "alt+[",
+  "hotkey_translate_reverse": "alt+;",
   "hotkey_clipboard": "alt+]",
-  "hotkey_quit": "ctrl+alt+q",
+  "hotkey_quit": "ctrl+alt+shift+q",
   "providers": ["mymemory", "google", "youdao"],
   "insert_method": "auto",
   "restore_clipboard": true,
